@@ -1,0 +1,462 @@
+<html>
+<head>
+    <title>Leap Motion and three.js</title>
+    <style>
+        canvas { width: 100%; height: 90% }
+        #status { position: absolute; top: 10; left: 10; }
+        #instructions { position: absolute; top: 10; right: 10; }
+    </style>
+    <script src="js/leap.js"></script>
+    <script src="js/zepto.min.js"></script>
+    <script src="js/three.js"></script>
+    <script>
+        var container;
+        var camera, scene, renderer;
+        var cube, plane;
+        var cubeSide = 200;
+        var cubeHalfSide = cubeSide / 2;
+        var cubeHalfSide2 = cubeHalfSide * cubeHalfSide;
+        var cubeHalfDiagonal = Math.sqrt(cubeHalfSide2 *2);
+        var cubeColor = new THREE.Color(0x00CC00);
+        var cubeSelectedColor = new THREE.Color(0xCC0000);
+
+        // for rotating about the y-axis (movement of finger in x-axis)
+        var targetYRotation = 0;
+        var targetYRotationOnMouseDown = 0;
+        var mouseXOnMouseDown = 0;
+
+        // for rotating about the x-axis (movement of finger in y-axis)
+        var targetXRotation = 0;
+        var targetXRotationOnMouseDown = 0;
+        var mouseYOnMouseDown = 0;
+
+        var windowHalfX = window.innerWidth / 2;
+        var windowHalfY = window.innerHeight / 2;
+        var depth = 1000;
+
+        var fingerSize = 10;
+        var fingerHalfSize = fingerSize / 2;
+        var handsMap = {};
+        var noHands = 0;
+
+        var touchingHandId = null;
+        var touchingFingerId = null;
+
+        function init() {
+            container = document.createElement('div');
+            document.body.appendChild(container);
+
+            camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 1, depth);
+            camera.position.y = 150;
+            camera.position.z = 500;
+
+            scene = new THREE.Scene();
+
+            setupCube(scene);
+
+            renderer = new THREE.CanvasRenderer();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+
+            container.appendChild( renderer.domElement );
+
+            document.addEventListener('mousedown', onDocumentMouseDown, false);
+            document.addEventListener('touchstart', onDocumentTouchStart, false);
+            document.addEventListener('touchmove', onDocumentTouchMove, false);
+            window.addEventListener('resize', onWindowResize, false);
+
+            animate();
+
+            listenForLeapFrames();
+        }
+
+        function setupCube(scene){
+            var cubeGeometry = new THREE.CubeGeometry(cubeSide, cubeSide, cubeSide);
+
+            // code for randomly coloured cube
+            // for (var i=0; i < cubeGeometry.faces.length; i++) {
+            //     cubeGeometry.faces[i].color.setHex(Math.random() * 0xffffff);
+            // }
+
+            var cubeMaterial = new THREE.MeshBasicMaterial({
+                // for setting colours based on those defined above
+                // vertexColors: THREE.FaceColors
+                color: cubeColor
+            });
+
+            cube = new THREE.Mesh(cubeGeometry, cubeMaterial);
+            cube.position.y = 150;
+            scene.add(cube);
+
+            // the cube shadow
+            // var shadow = new THREE.PlaneGeometry(200, 200);
+            // shadow.applyMatrix( new THREE.Matrix4().makeRotationX( -Math.PI / 2 ) );
+
+            // var shadowMaterial = new THREE.MeshBasicMaterial({
+            //     color: 0xe0e0e0
+            // });
+
+            // shadowMesh = new THREE.Mesh(shadow, shadowMaterial);
+            // scene.add(shadowMesh);
+
+            // var floor = new THREE.PlaneGeometry(200, 200);
+            // floor.applyMatrix( new THREE.Matrix4().makeRotationX( -Math.PI / 2 ) );
+
+            // var shadowMaterial = new THREE.MeshBasicMaterial({
+            //     color: 0xe0e0e0
+            // });
+
+            // plane = new THREE.Mesh(shadow, shadowMaterial);
+            // scene.add(plane);
+        }
+
+        function animate() {
+            requestAnimationFrame( animate );
+            render();
+        }
+
+        function render() {
+            // plane.rotation.y = cube.rotation.y;
+            cube.rotation.y += ( targetYRotation - cube.rotation.y ) * 0.05;
+
+            // for rotating around x axis (y motion)
+            cube.rotation.x += ( targetXRotation - cube.rotation.x ) * 0.05;
+            renderer.render( scene, camera );
+        }
+
+        function particleRender(context) {
+
+            // we get passed a reference to the canvas context
+            context.beginPath();
+            // and we just have to draw our shape at 0,0 - in this
+            // case an arc from 0 to 2Pi radians
+            context.arc( 0, 0, 1, 0,  Math.PI * 2, true );
+            context.fill();
+        }
+
+        function listenForLeapFrames(){
+            var onFrame = function(frame) {
+                updateHands(frame);
+                checkForCollisions();
+            };
+
+            Leap.loop(onFrame);
+        }
+
+        function checkForCollisions(){
+
+            if(touchingHandId){
+                // check if a previous touch is still on going
+                var touchingHand = handsMap[touchingHandId];
+                if(touchingHand){
+                    var touchingFinger = touchingHand[touchingFingerId];
+                    if(touchingFinger && isTouchingCube(touchingFinger)){
+                        updateCubeRotation(touchingFinger);
+                    }
+                    else{
+                        clearTouchingFinger();
+                    }
+                }
+                else{
+                    clearTouchingFinger();
+                }
+
+                return;
+            }
+
+            // for each hand, check if a finger intersects with the cube (first one wins)
+            $.each(handsMap, function(handKey, hand){
+                var keepLooking = true;
+                $.each(hand, function(fingerKey, finger){
+                    if( isTouchingCube(finger) ){
+                        setTouchingFinger(handKey, fingerKey, finger);
+                        keepLooking = false;
+                        return false;
+                    }
+                });
+
+                return keepLooking;
+            });
+
+            if(!touchingHandId){
+                clearTouchingFinger();
+            }
+        }
+
+        function isTouchingCube(finger){
+
+            var direction = new THREE.Vector3();
+            direction.sub(cube.position, finger.position);
+            // check if inside the cube (face flat)
+            if( direction.length() < (fingerHalfSize + cubeHalfSide)){
+                return true;
+            }
+
+            var ray = new THREE.Ray(finger.position, direction.normalize());
+            ray.far = fingerSize + cubeHalfDiagonal;
+            var intersects = ray.intersectObject(cube);
+
+            if(intersects.length > 0){
+                var intersectDistance = (fingerHalfSize);
+                for(var i=0, l=intersects.length; i < l; i++){
+                    if(intersects[i].distance < intersectDistance){
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        function updateCubeRotation(finger){
+            var moveX = finger.position.x - windowHalfX;
+            var moveY = finger.position.y - windowHalfY;
+            targetYRotation = targetYRotationOnMouseDown + ( moveX - mouseXOnMouseDown ) * 0.05;
+
+            // for rotating around x axis (y movement)
+            targetXRotation = targetXRotationOnMouseDown - ( moveY - mouseYOnMouseDown ) * 0.05;
+        }
+
+        function setTouchingFinger(handKey, fingerKey, finger){
+            touchingHandId = handKey;
+            touchingFingerId = fingerKey;
+            cube.material.color = cubeSelectedColor;
+            mouseXOnMouseDown = finger.position.x - windowHalfX;
+            mouseYOnMouseDown = finger.position.y - windowHalfY;
+            targetYRotationOnMouseDown = targetYRotation;
+
+            targetXRotationOnMouseDown = targetXRotation;
+        }
+
+        function clearTouchingFinger(){
+            touchingHandId = null;
+            touchingFingerId = null;
+            cube.material.color = cubeColor;
+            mouseXOnMouseDown = null;
+            mouseYOnMouseDown = null;
+            targetYRotationOnMouseDown = null
+            targetXRotationOnMouseDown = null
+        }
+
+        function getKey(id){
+            return ''+ id;
+        }
+
+        function updateHands(frame){
+            var newHandsMap = {};
+            noHands = 0;
+            for(var h=0, hl=frame.hands.length; h < hl; h++){
+                var leapHand = frame.hands[h];
+                var key = getKey(leapHand.id);
+                var existingHand = handsMap[key];
+                var newHand;
+                if(existingHand){
+                    newHand = updatehand(existingHand, leapHand);
+                    // only remove from the old handsMap if new version has fingers
+                    if(newHand){
+                        delete handsMap[key];
+                    }
+                }
+                else{
+                    newHand = createHand(leapHand);
+                    // only add the new hand if it had fingers
+                    if(newHand){
+                        addHandToScene(newHand);
+                    }
+                }
+
+                if(newHand){
+                    newHandsMap[key] = newHand;
+                    noHands++;
+                }
+            }
+
+            // remove old hands from scene
+            $.each(handsMap, function(key, hand){
+                removeHandFromScene(hand);
+            });
+
+            handsMap = newHandsMap;
+        }
+
+        function updatehand(existingHand, leapHand){
+            var newHand = {};
+            if(!leapHand.fingers || leapHand.fingers.length < 0){
+                // hand should be removed
+                return null;
+            }
+
+            var leapFingers = leapHand.fingers;
+            for(var f=0, fl=leapFingers.length; f < fl; f++){
+                var leapFinger = leapFingers[f];
+                var key = getKey(leapFinger.id);
+                var existingFinger = existingHand[key];
+                var newFinger;
+                if(existingFinger){
+                    setParticlePosition(existingFinger, leapFinger.tipPosition);
+                    delete existingHand[key];
+                    newFinger = existingFinger;
+                }
+                else{
+                    newFinger = createFingerParticle(leapFinger);
+                    scene.add(newFinger);
+                }
+                newHand[key] = newFinger;
+            }
+
+            // remove old fingers
+            $.each(existingHand, function(key, finger){
+                scene.remove(finger);
+            });
+
+            return newHand;
+        }
+
+        function createHand(leapHand){
+            if(leapHand.fingers && leapHand.fingers.length > 0){
+                var hand = {};
+                var leapFingers = leapHand.fingers;
+                for(var f=0, fl=leapFingers.length; f < fl; f++){
+                    var leapFinger = leapFingers[f];
+                    var key = getKey(leapFinger.id);
+                    hand[key] = createFingerParticle(leapFinger);
+                }
+
+                return hand;
+            }
+
+            // only create hands with fingers
+            return null;
+        }
+
+        function createFingerParticle(leapFinger){
+
+            var fingerMaterial = new THREE.ParticleCanvasMaterial({
+                color: 0x0044FF,
+                program: particleRender
+            });
+
+            var fingerParticle = new THREE.Particle(fingerMaterial);
+            fingerParticle.scale.x = fingerParticle.scale.y = fingerSize;
+
+            setParticlePosition(fingerParticle, leapFinger.tipPosition);
+
+            return fingerParticle;
+        }
+
+        function removeHandFromScene(hand){
+            $.each(hand, function(key, finger){
+                scene.remove(finger);
+            });
+        }
+
+        function addHandToScene(hand){
+            $.each(hand, function(key, finger){
+                scene.add(finger);
+            });
+        }
+
+        // these sensor ranges are subject to lighting conditions etc
+        var minX = -240; // -233.71
+        var maxX = 250; // 242.46
+        var minY = 30; // 30.97
+        var maxY = 266; // 495.89
+        var minZ = -165; // -161.12
+        var maxZ = 120; // 114.34
+
+        function scaleValue(val, min, max, rangeMin, rangeMax){
+            return ((val  - min) / (max - min) ) * (rangeMax - rangeMin) + rangeMin;
+        };
+
+        function setParticlePosition(particle, leapPos){
+
+            var x = scaleValue(leapPos.x, minX, maxX, -window.innerWidth, window.innerWidth);
+            var y = scaleValue(leapPos.y, minY, maxY, -400, window.innerHeight);
+            var z = scaleValue(leapPos.z, minZ, maxZ, -depth/2, depth/2);
+
+            particle.position.set(x,y,z);
+        };
+
+        function updateStatus(leapMsg){
+            var status = "No hand detected";
+            if(leapMsg.state === "frame" && leapMsg.frame.hands.length > 0){
+                var hands = leapMsg.frame.hands;
+                status = hands.length +" hands detected";
+                var hand = hands[0];
+                if(hand.fingers.length > 0){
+                    var fingers = hand.fingers;
+                    status = fingers.length +' fingers detected';
+                    for(var f=0, fl=fingers.length; f < fl; f++){
+                        var pos = fingers[f].tip.position;
+                        status += '<br/>finger '+ (f+1) +' at ('+ pos.x.toFixed(2) +','+ pos.y.toFixed(2) +','+ pos.z.toFixed(2) +')';
+                    }
+
+                }
+            }
+            $('#status').html(status);
+        }
+
+        function onWindowResize() {
+            windowHalfX = window.innerWidth / 2;
+            windowHalfY = window.innerHeight / 2;
+
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+
+            renderer.setSize( window.innerWidth, window.innerHeight );
+        }
+
+        function onDocumentMouseDown( event ) {
+            event.preventDefault();
+
+            document.addEventListener( 'mousemove', onDocumentMouseMove, false );
+            document.addEventListener( 'mouseup', onDocumentMouseUp, false );
+            document.addEventListener( 'mouseout', onDocumentMouseOut, false );
+
+            mouseXOnMouseDown = event.clientX - windowHalfX;
+            targetYRotationOnMouseDown = targetYRotation;
+        }
+
+        function onDocumentMouseMove( event ) {
+            var mouseX = event.clientX - windowHalfX;
+            targetYRotation = targetYRotationOnMouseDown + ( mouseX - mouseXOnMouseDown ) * 0.02;
+        }
+
+        function onDocumentMouseUp( event ) {
+            document.removeEventListener( 'mousemove', onDocumentMouseMove, false );
+            document.removeEventListener( 'mouseup', onDocumentMouseUp, false );
+            document.removeEventListener( 'mouseout', onDocumentMouseOut, false );
+        }
+
+        function onDocumentMouseOut( event ) {
+            document.removeEventListener( 'mousemove', onDocumentMouseMove, false );
+            document.removeEventListener( 'mouseup', onDocumentMouseUp, false );
+            document.removeEventListener( 'mouseout', onDocumentMouseOut, false );
+        }
+
+        function onDocumentTouchStart( event ) {
+            if ( event.touches.length === 1 ) {
+
+                event.preventDefault();
+
+                mouseXOnMouseDown = event.touches[ 0 ].pageX - windowHalfX;
+                targetYRotationOnMouseDown = targetYRotation;
+            }
+        }
+
+        function onDocumentTouchMove( event ) {
+            if ( event.touches.length === 1 ) {
+                event.preventDefault();
+
+                var mouseX = event.touches[ 0 ].pageX - windowHalfX;
+                targetYRotation = targetYRotationOnMouseDown + ( mouseX - mouseXOnMouseDown ) * 0.05;
+            }
+        }
+
+    </script>
+</head>
+<body onload='init();'>
+    <div id='status'></div>
+    <div id='instructions'>
+        Spin the cube with your fingertip . . .
+    </div>
+</body>
+</html>
